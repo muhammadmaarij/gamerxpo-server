@@ -26,7 +26,7 @@ SECRET_KEY = 'django-insecure-k0+a__by6$e@(_r*&gi($3-_h)nzrs)hvdbw%)cg3n-o2q-f3r
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
 
 # Application definition
@@ -46,7 +46,7 @@ INSTALLED_APPS = [
     'allauth.account',
     'allauth.socialaccount',
     'allauth.socialaccount.providers.google',
-    
+
 ]
 
 MIDDLEWARE = [
@@ -66,12 +66,26 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
     ],
 }
-CORS_ALLOW_CREDENTIALS = True
+# CORS_ALLOW_CREDENTIALS = True
+# CORS_ALLOWED_ORIGINS = [
+#     "http://localhost:3000",  # The origin of your Next.js app
+# ]
+# CSRF_TRUSTED_ORIGINS = ['http://localhost:3000']
+
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",  # The origin of your Next.js app
+    # Assuming Django runs here; useful if serving static HTML for testing
+    "http://localhost:8000",
+    "http://127.0.0.1:3000",  # Sometimes browsers use the IPv4 loopback address
 ]
-CSRF_TRUSTED_ORIGINS = ['http://localhost:3000']
 
+# Allow cookies to be included in cross-site HTTP requests
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:8000',
+    'http://127.0.0.1:3000',
+]
 
 
 ROOT_URLCONF = 'gamerxpo.urls'
@@ -95,7 +109,7 @@ TEMPLATES = [
     },
 ]
 
-SOCIALACCOUNT_LOGIN_ON_GET=True
+SOCIALACCOUNT_LOGIN_ON_GET = True
 SOCIALACCOUNT_AUTO_SIGNUP = True
 ACCOUNT_EMAIL_VERIFICATION = 'none'
 LOGIN_REDIRECT_URL = 'http://localhost:3000/signup/completeprofile/'
@@ -109,9 +123,9 @@ WSGI_APPLICATION = 'gamerxpo.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'XpoArena',
+        'NAME': 'EsportsArena',
         'USER': 'postgres',
-        'PASSWORD': '1234',
+        'PASSWORD': '123',
         'HOST': 'localhost',
     }
 }
@@ -199,4 +213,3 @@ SOCIALACCOUNT_PROVIDERS = {
         'OAUTH_PKCE_ENABLED': True,
     }
 }
-

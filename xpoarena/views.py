@@ -2,8 +2,8 @@ from rest_framework.decorators import api_view, parser_classes, permission_class
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework import status
 from rest_framework.response import Response
-from xpoarena.serializers import BoothSerializer, GamesSerializer, ThemeSerializer, BoothCustomizationSerializer, OrganizationSerializer, UserProfileSerializer, MyUserProfileSerializer
-from .models import Booth, Game, Theme, BoothCustomization, UserProfile, Organization, PaymentHistory
+from xpoarena.serializers import *
+from .models import Booth, Game, Theme, BoothCustomization, UserProfile, Organization, PaymentHistory, GameFeedback, Event
 from django.contrib.auth import authenticate, login
 from django.contrib.auth.password_validation import validate_password
 from rest_framework.exceptions import ValidationError
@@ -25,6 +25,9 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.core.mail import send_mail
 from django.db.models import Q
+from rest_framework_simplejwt.tokens import RefreshToken
+from .serializers import SponsorshipSerializer
+
 
 logger = logging.getLogger(__name__)
 
@@ -32,18 +35,111 @@ stripe.api_key = settings.STRIPE_SECRET_KEY
 API_URL = "http://localhost:8000"
 
 
+def authenticate_for_token(request):
+    user = request.user
+    if user.is_authenticated:
+        refresh = RefreshToken.for_user(user)
+        access_token = refresh.access_token
+        # Redirect to your frontend with the token
+        frontend_url = f"http://localhost:3000/signup/completeprofile/?access={access_token}&refresh={refresh}"
+        return redirect(frontend_url)
+    else:
+        return redirect('login')
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_event(request):
+    user = request.user  # Retrieve the authenticated user
+    try:
+        # Get the organization where the current user is the creator
+        organization = Organization.objects.get(created_by=user)
+
+        # Extract event data from request data
+        event_data = {
+            'eventName': request.data.get('eventName'),
+            'description': request.data.get('description'),
+            'dateOfEvent': request.data.get('dateOfEvent'),
+            'startTime': request.data.get('startTime'),
+            'endTime': request.data.get('endTime'),
+            'image': request.FILES.get('image'),
+            'organization': organization.id  # Set the organization ID
+        }
+
+        # Serialize data
+        serializer = EventSerializer(data=event_data)
+        if serializer.is_valid():
+            serializer.save()  # Save if valid
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        else:
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    except Organization.DoesNotExist:
+        return Response({'error': 'Organization not found for this user.'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_user_profile_picture(request, username):
+    try:
+        # Retrieve the User object based on the username
+        user = User.objects.get(username=username)
+
+        # Retrieve the UserProfile object linked to the User
+        user_profile = UserProfile.objects.get(user=user)
+
+        # Check the profile_picture field
+        if user_profile.profile_picture and hasattr(user_profile.profile_picture, 'url'):
+            return Response({'profile_picture': request.build_absolute_uri(user_profile.profile_picture.url)})
+
+        # If profile_picture is not set, check profile_picture_url
+        if user_profile.profile_picture_url:
+            if user_profile.profile_picture_url.lower() != "null":
+                return Response({'profile_picture_url': user_profile.profile_picture_url})
+            else:
+                return Response({'message': 'No images'})
+
+        # If both are empty or null
+        return Response({'message': 'No images'})
+
+    except User.DoesNotExist:
+        return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+    except UserProfile.DoesNotExist:
+        return Response({'error': 'UserProfile not found.'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_user_role_by_username(request, username):
+    try:
+        user = User.objects.get(username=username)
+        user_profile = UserProfile.objects.get(user_id=user.id)
+
+        # Return the Role field from the UserProfile
+        return Response({'role': user_profile.role})
+    except User.DoesNotExist:
+        # If no User exists with the given username, return an error message
+        return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+    except UserProfile.DoesNotExist:
+        # If no UserProfile exists for the user, return an error message
+        return Response({'error': 'UserProfile not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+
 @api_view(['GET'])
 def get_games_by_booth_and_genre(request):
     booth_id = request.query_params.get('booth_id')
     genre = request.query_params.get('genre')
-    
+
     if booth_id is None or genre is None:
         return Response({'error': 'Missing parameters'}, status=status.HTTP_400_BAD_REQUEST)
 
     games = Game.objects.filter(booth_id=booth_id, genre=genre)
     serializer = GamesSerializer(games, many=True)
-    
+
     return Response(serializer.data)
+
 
 @api_view(['POST'])
 def create_checkout_session(request, pk):
@@ -75,7 +171,6 @@ def create_checkout_session(request, pk):
         return Response({'error': 'Game not found'}, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
         return Response({'error': 'Something went wrong while creating Stripe session', 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -127,16 +222,17 @@ def stripe_webhook_view(request):
 def remove_user_from_organization(request, user_id):
     try:
         user_profile = UserProfile.objects.get(user_id=user_id)
-        
+
         # Check if the requesting user is allowed to remove the user
         if request.user != user_profile.user and request.user != user_profile.organization.created_by:
             return Response({'error': 'You do not have permission to remove this user.'}, status=status.HTTP_403_FORBIDDEN)
-        
+
         user_profile.organization_id = None
         user_profile.save()
         return Response({'message': 'User removed from the organization successfully.'})
     except UserProfile.DoesNotExist:
         return Response({'error': 'UserProfile not found.'}, status=status.HTTP_404_NOT_FOUND)
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -156,6 +252,7 @@ def get_developers(request):
     except UserProfile.DoesNotExist:
         return Response({'error': 'UserProfile for the user does not exist.'}, status=404)
 
+
 @api_view(['PATCH'])
 @permission_classes([IsAuthenticated])
 def update_organization_in_user_profile(request):
@@ -173,6 +270,7 @@ def update_organization_in_user_profile(request):
         return Response({"error": "Organization not found."}, status=404)
     except UserProfile.DoesNotExist:
         return Response({"error": "UserProfile not found."}, status=404)
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -195,12 +293,13 @@ def get_organization_details_by_id(request, org_id):
     serializer = OrganizationSerializer(organization)
     return Response(serializer.data)
 
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_user_organization_id(request):
     # Get the UserProfile of the currently authenticated user
     user_profile = get_object_or_404(UserProfile, user=request.user)
-    
+
     # Return organization_id if it exists, otherwise return null
     organization_id = user_profile.organization_id if user_profile.organization else None
     return Response({'organization_id': organization_id})
@@ -214,13 +313,15 @@ def update_organization(request):
     except Organization.DoesNotExist:
         return Response({'error': 'Organization not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    serializer = OrganizationSerializer(organization, data=request.data, partial=True)
-    
+    serializer = OrganizationSerializer(
+        organization, data=request.data, partial=True)
+
     if serializer.is_valid():
         serializer.save()
         return Response(serializer.data, status=status.HTTP_200_OK)
-    
+
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -233,6 +334,7 @@ def get_organization_id_from_userprofile(request, user_id):
     except UserProfile.DoesNotExist:
         return Response({'error': 'UserProfile not found.'}, status=404)
 
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_organization_details(request):
@@ -244,6 +346,7 @@ def get_organization_details(request):
         return Response(serializer.data)
     except Organization.DoesNotExist:
         return Response({'error': 'No organization found for user.'}, status=404)
+
 
 @api_view(['PATCH'])
 @permission_classes([IsAuthenticated])
@@ -268,7 +371,7 @@ def update_user_details(request):
         user.first_name = data.get('first_name', user.first_name)
         user.last_name = data.get('last_name', user.last_name)
         user.username = data.get('username', user.username)
-        
+
         user.save()
 
         return Response({
@@ -284,14 +387,14 @@ def update_user_details(request):
     except Exception as e:
         return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+
 @api_view(['GET'])
-@permission_classes([IsAuthenticated]) 
+@permission_classes([IsAuthenticated])
 def get_usernames(request):
     users = User.objects.all()
     usernames = [user.username for user in users]
-    
-    return JsonResponse({'usernames': usernames})
 
+    return JsonResponse({'usernames': usernames})
 
 
 @api_view(['GET'])
@@ -303,6 +406,7 @@ def verify_auth(request):
     else:
         # User is not authenticated
         return JsonResponse({"authenticated": False})
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -318,7 +422,7 @@ def register_organization(request):
         return Response({**serializer.data}, status=status.HTTP_201_CREATED)
     else:
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -332,29 +436,33 @@ def update_user_and_profile(request):
 
     # Retrieve or initialize the user profile
     profile, created = UserProfile.objects.get_or_create(user=user)
-    
+
     # Update non-file fields
     profile.role = request.data.get('role')
-    profile.profile_picture_url = request.data.get('profile_picture_url', profile.profile_picture_url)
-    
+    profile.profile_picture_url = request.data.get(
+        'profile_picture_url', profile.profile_picture_url)
+
     # Handle file field separately
     if 'profile_picture' in request.FILES:
         profile.profile_picture = request.FILES['profile_picture']
-    
+
     profile.save()
 
     return Response({"message": "User and profile updated successfully."})
 
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def get_user_id(request):
+def get_user_id_and_username(request):
     if request.user.is_authenticated:
         user_data = {
             'userId': request.user.id,
+            'username': request.user.username,  # Adding the username to the response
         }
         return JsonResponse(user_data)
     else:
         return JsonResponse({'error': 'User is not authenticated'}, status=401)
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -380,6 +488,7 @@ def user_information(request):
 
     return JsonResponse(user_data)
 
+
 @api_view(['GET'])
 def user_details(request):
     if not request.user.is_authenticated:
@@ -391,12 +500,13 @@ def user_details(request):
         'email': user.email,
         'first_name': user.first_name,
         'last_name': user.last_name,
-        'has_profile': False, 
+        'has_profile': False,
     }
 
     # Check for social account information
     try:
-        social_account = SocialAccount.objects.get(user=user, provider='google')
+        social_account = SocialAccount.objects.get(
+            user=user, provider='google')
         user_data.update({
             'social_name': social_account.extra_data.get('name', ''),
             'email': social_account.extra_data.get('email', ''),
@@ -409,12 +519,14 @@ def user_details(request):
     # Check if the user has a UserProfile
     try:
         UserProfile.objects.get(user=user)
-        user_data['has_profile'] = True  # Update the flag if the UserProfile exists
+        # Update the flag if the UserProfile exists
+        user_data['has_profile'] = True
     except UserProfile.DoesNotExist:
         # No action needed if there is no UserProfile
         pass
-    
+
     return Response(user_data)
+
 
 @api_view(['GET', 'POST', 'PATCH'])
 @parser_classes([MultiPartParser, FormParser])
@@ -457,8 +569,9 @@ def booth(request):
         else:
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
 @api_view(['GET', 'POST', 'PATCH'])
-@parser_classes([MultiPartParser, FormParser])  
+@parser_classes([MultiPartParser, FormParser])
 def update_booth(request, booth_id):
     if request.method == 'PATCH':
         data = request.data
@@ -475,10 +588,10 @@ def update_booth(request, booth_id):
             return Response(serializer.data, status=status.HTTP_200_OK)
         else:
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        
+
+
 @api_view(['GET', 'POST', 'PATCH', 'DELETE'])
-@parser_classes([MultiPartParser, FormParser])  
+@parser_classes([MultiPartParser, FormParser])
 def update_game(request, title):
     if request.method == 'PATCH':
         data = request.data
@@ -495,7 +608,7 @@ def update_game(request, title):
             return Response(serializer.data, status=status.HTTP_200_OK)
         else:
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
+
     elif request.method == 'DELETE':
         try:
             game_object = Game.objects.get(title=title)
@@ -505,7 +618,7 @@ def update_game(request, title):
         game_object.delete()
         return Response({"success": f"Booth {title} deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
-        
+
 @api_view(['GET', 'POST'])
 def games(request):
     if request.method == 'GET':
@@ -514,10 +627,10 @@ def games(request):
             title = request.GET.get('title', None)
 
             if id is not None:
-                objects = Game.objects.filter(booth_id = id)
+                objects = Game.objects.filter(booth_id=id)
                 serializer = GamesSerializer(objects, many=True)
                 return Response(serializer.data, status=status.HTTP_200_OK)
-            
+
             if title is not None:
                 object = Game.objects.get(title=title)
                 serializer = GamesSerializer(object)
@@ -536,6 +649,7 @@ def games(request):
         else:
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
 @api_view(['POST', 'GET'])
 def theme(request):
     if request.method == 'POST':
@@ -544,7 +658,7 @@ def theme(request):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     elif request.method == 'GET':
         if 'name' in request.query_params:
             name = request.GET.get('name')
@@ -557,6 +671,7 @@ def theme(request):
             serializer = ThemeSerializer(object)
             return Response(serializer.data)
 
+
 @api_view(['POST', 'GET'])
 def customizedBooth(request):
     if request.method == 'POST':
@@ -566,15 +681,14 @@ def customizedBooth(request):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     elif request.method == 'GET':
         if request.query_params:
             id = request.GET.get('id')
             object = BoothCustomization.objects.get(booth_id=id)
             serializer = BoothCustomizationSerializer(object)
             return Response(serializer.data, status=status.HTTP_200_OK)
-        
-        
+
 
 @api_view(['PUT'])
 def update_booth_customization(request, pk):
@@ -584,28 +698,42 @@ def update_booth_customization(request, pk):
         return Response(status=status.HTTP_404_NOT_FOUND)
 
     if request.method == 'PUT':
-        serializer = BoothCustomizationSerializer(booth_customization, data=request.data)
+        serializer = BoothCustomizationSerializer(
+            booth_customization, data=request.data)
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
+
 @api_view(['POST'])
 def login_view(request):
     username = request.data.get('username')
     password = request.data.get('password')
     user = authenticate(request, username=username, password=password)
+
     if user is not None:
         login(request, user)
+
+        # Generate tokens
+        refresh = RefreshToken.for_user(user)
+        access_token = refresh.access_token
+
         try:
             UserProfile.objects.get(user=user)
             has_profile = True
         except UserProfile.DoesNotExist:
             has_profile = False
-        return Response({"detail": "Login successful", "has_profile": has_profile}, status=200)
+
+        return Response({
+            "detail": "Login successful",
+            "has_profile": has_profile,
+            "access": str(access_token),
+            "refresh": str(refresh)
+        }, status=200)
     else:
         return Response({"detail": "Invalid credentials"}, status=400)
-    
+
 
 @api_view(['POST'])
 def signup(request):
@@ -622,7 +750,8 @@ def signup(request):
         validate_password(password1)
 
         # Create a new user. Note: You should handle more cases here, such as existing users.
-        user = User.objects.create_user(username=username, email=email, password=password1)
+        user = User.objects.create_user(
+            username=username, email=email, password=password1)
         user.save()
         return Response({"detail": "Signup successful"}, status=status.HTTP_201_CREATED)
     except ValidationError as e:
@@ -632,6 +761,120 @@ def signup(request):
         logger.error(f"Unexpected error during signup: {str(e)}")
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 def google_login(request):
     google_login_url = '/accounts/google/login'
     return HttpResponseRedirect(google_login_url)
+
+
+@api_view(['POST'])
+# @permission_classes([IsAuthenticated])
+def create_feedback(request, game_id):
+    data = {
+        'game': game_id,
+        'feedback_text': request.data.get('feedback_text'),
+        'submitted_by': request.user.id
+    }
+    serializer = GameFeedbackSerializer(
+        data=data, context={'request': request})
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_feedbacks(request, game_id):
+    feedbacks = GameFeedback.objects.filter(game_id=game_id)
+    serializer = GameFeedbackSerializer(feedbacks, many=True)
+    return Response(serializer.data)
+
+
+@api_view(['PATCH'])
+# @permission_classes([IsAuthenticated])
+def update_feedback(request, feedback_id):
+    feedback = get_object_or_404(
+        GameFeedback, pk=feedback_id, submitted_by=request.user)
+    serializer = GameFeedbackSerializer(
+        feedback, data=request.data, partial=True, context={'request': request})
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['DELETE'])
+# @permission_classes([IsAuthenticated])
+def delete_feedback(request, feedback_id):
+    feedback = get_object_or_404(
+        GameFeedback, pk=feedback_id, submitted_by=request.user)
+    feedback.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['POST'])
+def create_sponsorship(request):
+    try:
+        # Extract event ID from request data
+        event_id = request.data.get('event')
+        if not event_id:
+            return Response({'error': 'Event ID must be provided.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Retrieve the event based on the provided ID
+        event = Event.objects.get(id=event_id)
+
+        # Prepare data for the serializer
+        sponsorship_data = {
+            'event': event.id,
+            'package': request.data.get('package'),
+            'name': request.data.get('name'),
+            'price': request.data.get('price'),
+            'details': request.data.get('details'),
+            'logo': request.FILES.get('logo')  # Handle file upload
+        }
+
+        # Serialize data
+        serializer = SponsorshipSerializer(data=sponsorship_data)
+        if serializer.is_valid():
+            serializer.save()
+
+            # Update the event sponsorship status based on the package type
+            package_type = request.data.get('package')
+            if package_type == 'Gold':
+                event.gold_sponsor = True
+            elif package_type == 'Silver':
+                event.silver_sponsor = True
+            elif package_type == 'Bronze':
+                event.bronze_sponsor = True
+            event.save()
+
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        else:
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    except Event.DoesNotExist:
+        return Response({'error': 'Event not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+# or use [IsAuthenticated] if you want to limit access
+@permission_classes([AllowAny])
+def get_event(request):
+    events = Event.objects.all()
+    serializer = EventSerializer(events, many=True)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_sponsorships(request):
+    event_id = request.query_params.get('event_id')
+    if event_id:
+        sponsorships = Sponsorship.objects.filter(event__id=event_id)
+    else:
+        sponsorships = Sponsorship.objects.all()
+    serializer = SponsorshipSerializer(sponsorships, many=True)
+    return Response(serializer.data)
